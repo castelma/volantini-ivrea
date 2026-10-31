@@ -39,8 +39,8 @@ UA = (
 )
 
 NEGOZI = [
-    {"id": "bennet", "nome": "Bennet", "dove": "via Dora Baltea 31", "lettore": "promoqui",
-     "slug": "bennet", "retailer": "60", "fonte": "PromoQui"},
+    {"id": "bennet", "nome": "Bennet", "dove": "via Dora Baltea 31", "lettore": "bennet",
+     "url": "https://www.doveconviene.it/ivrea/volantino/bennet", "fonte": "DoveConviene"},
     {"id": "conad", "nome": "Conad", "dove": "corso Vercelli 131", "lettore": "conad",
      "url": "https://www.conad.it/ricerca-negozi/conad-corso-vercelli-131-10015-ivrea--008936",
      "fonte": "sito Conad"},
@@ -48,9 +48,8 @@ NEGOZI = [
      "url": "https://www.conad.it/ricerca-negozi/conad-city-viale-della-liberazione-1-10015-ivrea--003791",
      "fonte": "sito Conad"},
     {"id": "coop", "nome": "Coop", "dove": "corso Vercelli", "lettore": "coop",
-     "slug": "coop", "retailer": "962",
      "url": "https://negozi.volantinopiu.com/ccno-8001120619099.html",
-     "fonte": "date da PromoQui, volantino dal sito Coop"},
+     "fonte": "sito Coop"},
     {"id": "carrefour-market", "nome": "Carrefour Market", "dove": "via Circonvallazione 54", "lettore": "carrefour",
      "url": "https://www.carrefour.it/volantino/supermercato-carrefour-market-ivrea-via-circonvallazione-54/5158",
      "fonte": "sito Carrefour"},
@@ -62,7 +61,7 @@ NEGOZI = [
 # Quello che ho letto a mano nei volantini. Ogni voce sparisce da sola quando il volantino
 # non c'è più: la chiave è il file o il numero del volantino. Il testo è verificato sulla pagina.
 NOTE_A_MANO = {
-    "1732771": [  # Coop, Offerte Top, 29/10-11/11
+    "29336": [  # Coop, Offerte Top, 29/10-11/11
         {"dal": "2026-10-29", "al": "2026-11-04",
          "testo": "Frutta e verdura, 1ª settimana: banane 1,28 €/kg, zucchine 1,48 €/kg, verza 0,98 €/kg, clementine −25% ai soci (pag. 3)"},
         {"dal": "2026-11-05", "al": "2026-11-11",
@@ -121,42 +120,37 @@ def data_vicina(giorno, mese, oggi):
     return min(candidate, key=lambda d: abs((d - oggi).days))
 
 
-# --- PromoQui: la pagina della città contiene i volantini con le date, nei dati della pagina
+# --- Bennet: il suo sito e PromoQui non rispondono al giro automatico (403). DoveConviene sì.
 
-def volantini_promoqui(slug, retailer):
-    pagina = testo(f"https://www.promoqui.it/ivrea/{slug}")
-    trovato = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', pagina, re.S)
-    if not trovato:
-        raise NonLetto(f"PromoQui {slug}: la pagina è cambiata")
-    risorse = json.loads(trovato.group(1))["props"]["pageProps"]["apiResources"]
-    visti = {}
-
-    def cerca(oggetto):
-        if isinstance(oggetto, dict):
-            if {"start_date", "end_date", "id", "retailer_id", "title"} <= oggetto.keys():
-                if str(oggetto["retailer_id"]) == retailer:
-                    visti[str(oggetto["id"])] = oggetto
-            for valore in oggetto.values():
-                cerca(valore)
-        elif isinstance(oggetto, list):
-            for valore in oggetto:
-                cerca(valore)
-
-    cerca(risorse)
-    return [
-        {
-            "chiave": chiave,
-            "titolo": accenti(v["title"].strip()),
-            "dal": str(v["start_date"])[:10],
-            "al": str(v["end_date"])[:10],
-            "url": f"https://www.promoqui.it/volantino/{slug}/{chiave}",
-        }
-        for chiave, v in visti.items()
-    ]
+BASE_BENNET = "https://www.doveconviene.it/ivrea/iper-e-super/bennet/volantino/ultime-offerte-bennet?flyerId="
 
 
-def leggi_promoqui(negozio, oggi):
-    return volantini_promoqui(negozio["slug"], negozio["retailer"])
+def blocchi_json_ld(pagina):
+    for blocco in re.finditer(r'<script type="application/ld\+json">\s*(\{.*?\})\s*</script>', pagina, re.S):
+        try:
+            yield json.loads(blocco.group(1))
+        except ValueError:
+            continue
+
+
+def leggi_bennet(negozio, oggi):
+    """La pagina della città elenca i volantini; quella del volantino ha le date e, nei prodotti, il titolo."""
+    lista = testo(negozio["url"])
+    risultato = []
+    for numero in sorted(set(re.findall(r"/bennet/volantino/ultime-offerte-bennet\?flyerId=(\d+)", lista))):
+        dati = list(blocchi_json_ld(testo(BASE_BENNET + numero)))
+        date = next((d for d in dati if d.get("datePublished") and d.get("expires")), None)
+        if not date:
+            raise NonLetto(f"Bennet {numero}: date non trovate")
+        titolo = next((d["description"] for d in dati if d.get("@type") == "Product" and d.get("description")), "Volantino")
+        risultato.append({
+            "chiave": numero,
+            "titolo": accenti(html.unescape(titolo).strip()),
+            "dal": date["datePublished"][:10],
+            "al": date["expires"][:10],
+            "url": BASE_BENNET + numero,
+        })
+    return risultato
 
 
 # --- Conad: la scheda del negozio contiene anche i volantini della settimana dopo
@@ -227,7 +221,7 @@ def leggi_carrefour(negozio, oggi):
     return list(risultato.values())
 
 
-# --- Coop: date da PromoQui; dal sito Coop il volantino del negozio e, se serve, le pagine che partono dopo
+# --- Coop: dal sito Coop il volantino del negozio; nel PDF le date e le pagine che partono dopo
 
 MESI = {m: i + 1 for i, m in enumerate(
     "gennaio febbraio marzo aprile maggio giugno luglio agosto settembre ottobre novembre dicembre".split())}
@@ -251,47 +245,55 @@ def pagine_con_date(percorso_pdf):
     return finestre
 
 
-def note_dal_pdf(url_pdf, dal, al, oggi):
-    if not url_pdf:
-        return []
-    with tempfile.NamedTemporaryFile(suffix=".pdf") as file_pdf:
-        file_pdf.write(scarica(url_pdf, timeout=180))
-        file_pdf.flush()
-        try:
-            finestre = pagine_con_date(file_pdf.name)
-        except (OSError, subprocess.SubprocessError):
-            return []
-    note = []
-    inizio_volantino = dt.date.fromisoformat(dal)
-    for (mese_i, giorno_i, mese_f, giorno_f), pagine in finestre.items():
-        inizio = data_vicina(giorno_i, mese_i, oggi)
-        fine = data_vicina(giorno_f, mese_f, oggi)
-        if inizio <= inizio_volantino or fine < inizio:
-            continue
-        elenco = ", ".join(str(p) for p in sorted(pagine))
-        note.append({"dal": inizio.isoformat(), "al": fine.isoformat(),
-                     "testo": f"Offerte che partono dopo: pag. {elenco}"})
-    return note
-
-
 def leggi_coop(negozio, oggi):
-    volantini = volantini_promoqui(negozio["slug"], negozio["retailer"])
+    """La pagina del negozio dà titolo e volantino; le date sono scritte nel PDF. Letti una volta sola per volantino."""
     pagina = testo(negozio["url"])
-    rimando = re.search(r"https://negozi\.volantinopiu\.com/redirect\d+\.html\?id_pv=\d+", pagina)
-    url_volantino, url_pdf = negozio["url"], None
-    if rimando:
-        richiesta = urllib.request.Request(rimando.group(0), headers={"User-Agent": UA})
+    risultato = []
+    for trovato in re.finditer(r"https://negozi\.volantinopiu\.com/redirect(\d+)\.html\?id_pv=\d+", pagina):
+        chiave = trovato.group(1)
+        if any(v["chiave"] == chiave for v in risultato):
+            continue
+        memoria = USCITA / "img" / chiave / "volantino.json"
+        if memoria.exists():
+            risultato.append(json.loads(memoria.read_text("utf-8")))
+            continue
+        titoli = re.findall(r"<h5[^>]*>\s*([^<]+?)\s*</h5>", pagina[:trovato.start()])
+        richiesta = urllib.request.Request(trovato.group(0), headers={"User-Agent": UA})
         with urllib.request.urlopen(richiesta, timeout=40) as risposta:
             url_volantino = risposta.geturl()
             interna = risposta.read().decode("utf-8", "replace")
         pdf = re.search(r"https://resources\.volantinopiu\.it/flyer/[^\"' ?]+\.pdf", interna)
-        url_pdf = pdf.group(0) if pdf else None
-    for volantino in volantini:
-        volantino["url"] = url_volantino
-        volantino["pdf"] = url_pdf
-        if volantino["chiave"] not in NOTE_A_MANO:
-            volantino["note"] = note_dal_pdf(url_pdf, volantino["dal"], volantino["al"], oggi)
-    return volantini
+        if not pdf:
+            raise NonLetto(f"Coop {chiave}: PDF non trovato")
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as file_pdf:
+            file_pdf.write(scarica(pdf.group(0), timeout=180))
+            file_pdf.flush()
+            finestre = pagine_con_date(file_pdf.name)
+        if not finestre:
+            raise NonLetto(f"Coop {chiave}: date non trovate nel PDF")
+        # Le date del volantino sono quelle scritte sul maggior numero di pagine
+        principale = max(finestre, key=lambda k: len(finestre[k]))
+        dal = data_vicina(principale[1], principale[0], oggi)
+        al = data_vicina(principale[3], principale[2], oggi)
+        note = []
+        for (mese_i, giorno_i, mese_f, giorno_f), pagine in finestre.items():
+            inizio, fine = data_vicina(giorno_i, mese_i, oggi), data_vicina(giorno_f, mese_f, oggi)
+            if inizio > dal and fine >= inizio:
+                elenco = ", ".join(str(n) for n in sorted(pagine))
+                note.append({"dal": inizio.isoformat(), "al": fine.isoformat(), "testo": f"Offerte che partono dopo: pag. {elenco}"})
+        volantino = {
+            "chiave": chiave,
+            "titolo": titoli[-1] if titoli else "Volantino",
+            "dal": dal.isoformat(),
+            "al": al.isoformat(),
+            "url": url_volantino,
+            "pdf": pdf.group(0),
+            "note": note,
+        }
+        memoria.parent.mkdir(parents=True, exist_ok=True)
+        memoria.write_text(json.dumps(volantino, ensure_ascii=False), "utf-8")
+        risultato.append(volantino)
+    return risultato
 
 
 # --- I prodotti, volantino per volantino
@@ -302,14 +304,9 @@ def prodotti_bennet(volantino, oggi):
     Il prezzo vero è nella foto: il numero che danno a parte a volte è sbagliato, e non lo uso.
     Gli altri nomi si leggono dalla pagina con l'OCR. I prodotti senza foto propria si ritagliano dalla pagina nel browser.
     """
-    pagina = testo("https://www.doveconviene.it/ivrea/iper-e-super/bennet/volantino/ultime-offerte-bennet"
-                   f"?flyerId={volantino['chiave']}")
+    pagina = testo(BASE_BENNET + volantino["chiave"])
     nomi = {}
-    for blocco in re.finditer(r'<script type="application/ld\+json">\s*(\{.*?\})\s*</script>', pagina, re.S):
-        try:
-            dato = json.loads(blocco.group(1))
-        except ValueError:
-            continue
+    for dato in blocchi_json_ld(pagina):
         if dato.get("@type") == "Product" and dato.get("image"):
             codice = re.search(r"gibCover_([0-9a-f-]{36})_", dato["image"][0])
             if codice:
@@ -572,7 +569,7 @@ def aggiungi_prodotti(negozio, volantini, precedenti, oggi):
     return errori
 
 
-LETTORI = {"promoqui": leggi_promoqui, "conad": leggi_conad, "carrefour": leggi_carrefour, "coop": leggi_coop}
+LETTORI = {"bennet": leggi_bennet, "conad": leggi_conad, "carrefour": leggi_carrefour, "coop": leggi_coop}
 
 
 def completa(volantini, oggi):
