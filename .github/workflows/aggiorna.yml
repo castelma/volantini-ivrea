@@ -7,6 +7,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 concurrency:
   group: aggiorna
   cancel-in-progress: false
@@ -44,6 +45,10 @@ jobs:
           path: docs
       - id: pubblica
         uses: actions/deploy-pages@v4
+      - name: Tiene acceso il giro programmato (GitHub lo spegne dopo 60 giorni senza commit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/aggiorna.yml/enable"
       - name: Se un negozio non si è letto, il giro risulta fallito e GitHub manda la mail
         if: steps.leggi.outcome == 'failure'
         run: exit 1
