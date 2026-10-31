@@ -1,0 +1,49 @@
+name: aggiorna
+on:
+  schedule:
+    - cron: "30 5 * * *"   # 6:30 d'inverno, 7:30 d'estate
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: aggiorna
+  cancel-in-progress: false
+jobs:
+  aggiorna:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.pubblica.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Riprende ritagli e dati dell'ultima volta
+        uses: actions/cache/restore@v4
+        with:
+          path: docs
+          key: sito-${{ github.run_id }}
+          restore-keys: sito-
+      - name: Installa poppler e tesseract
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils tesseract-ocr
+      - name: Legge i negozi
+        id: leggi
+        continue-on-error: true
+        run: python3 aggiorna.py
+      - name: Salva ritagli e dati per la prossima volta
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: docs
+          key: sito-${{ github.run_id }}
+      - name: Prepara la pagina
+        run: cp apple-touch-icon.png docs/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: pubblica
+        uses: actions/deploy-pages@v4
+      - name: Se un negozio non si è letto, il giro risulta fallito e GitHub manda la mail
+        if: steps.leggi.outcome == 'failure'
+        run: exit 1
