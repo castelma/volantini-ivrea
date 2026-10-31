@@ -1,0 +1,27 @@
+name: prova-rete
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  prova:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Quali siti rispondono da GitHub
+        run: |
+          UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+          for u in \
+            "https://www.promoqui.it/ivrea/bennet" \
+            "https://www.doveconviene.it/ivrea/iper-e-super/bennet/volantino/ultime-offerte-bennet?flyerId=1725903" \
+            "https://www.doveconviene.it/ivrea/volantino/bennet" \
+            "https://www.bennet.com/volantini" \
+            "https://api-viewer-zmags.shopfully.cloud/publication/it_it_960708" \
+            "https://shopfully-publication-api.global.ssl.fastly.net/publication_pages/it_it/960708/1" \
+            "https://it-it-media-publications.shopfully.cloud/publications/page_assets/960708/1/page_1_level_5_1264360711.jpeg" \
+            "https://negozi.volantinopiu.com/ccno-8001120619099.html" \
+            "https://coop.volantinopiu.com/volantino2933600pv3974.html" \
+            "https://resources.volantinopiu.it/flyer/2/9/3/3/6/a52267c613242b94ce6727b46afa567c.pdf" \
+            "https://www.anteprimavolantino.it/bennet/" \
+            "https://www.anteprimavolantino.it/wp-json/wp/v2/posts?search=volantino%20bennet&per_page=3&_fields=date,title,link" ; do
+            curl -sS -L -m 40 -A "$UA" -H "Accept-Language: it-IT,it;q=0.9" -r 0-200000 -o /dev/null -w "%{http_code} %{size_download} $u\n" "$u" || echo "ERRORE $u"
+          done
