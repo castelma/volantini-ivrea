@@ -104,6 +104,8 @@ table.prodotti td + td { padding-left: 10px; }
 .prezzo { margin-top: 3px; font-size: 21px; font-weight: 800; line-height: 1.15; }
 .prezzo small { display: block; font-size: 12.5px; font-weight: 500; color: var(--tenue); }
 .prezzo-foto { margin-top: 3px; font-size: 13px; color: var(--tenue); }
+.sconto { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 3px; background: var(--urgente-fondo); color: var(--urgente); font-size: 13.5px; font-weight: 800; vertical-align: 3px; white-space: nowrap; }
+.prezzo-foto .sconto { margin: 0 4px 0 0; vertical-align: baseline; }
 .dove-prodotto { margin-top: 4px; font-size: 12.5px; color: var(--tenue); }
 .quando-prodotto { margin-top: 3px; }
 .altri { width: 100%; margin-top: 12px; padding: 11px; border: 1px solid var(--riga); border-radius: 4px; background: var(--foglio); color: var(--inchiostro); font: 600 15px var(--testo); }
@@ -178,6 +180,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
     <div class="chips" id="filtro-negozi" role="group" aria-label="Negozio"></div>
     <div class="chips" id="filtro-categorie" role="group" aria-label="Categoria"></div>
     <div class="chips" id="filtro-quando" role="group" aria-label="Quando"></div>
+    <div class="chips" id="filtro-ordine" role="group" aria-label="Ordine"></div>
   </div>
   <p class="conteggio" id="conteggio"></p>
   <table class="prodotti">
@@ -198,8 +201,9 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
   <h2 class="secondo" id="t-note">Da sapere</h2>
   <div class="note-finali">
     <p><b>Il prezzo giusto è quello scritto nella foto:</b> è un pezzo del volantino. Conad e Coop li ritaglio dai loro PDF, quindi qualche riquadro prende anche il prodotto vicino, o il nome scritto accanto non è preciso. Tocca la foto: si apre la pagina vera del volantino, con un riquadro magenta sul taglio.</p>
-    <p><b>Bennet non ha il prezzo in numero.</b> Il numero che danno i siti a volte è sbagliato: il Findus in copertina costa 6,99 €, loro scrivono 15,99 €. Quindi lo mostro solo in foto, e nella ricerca Bennet viene dopo gli altri. Di molti prodotti Bennet i siti non danno nemmeno il nome: lo leggo dalla foto con un programma, quindi può essere impreciso, e sopra c'è scritto. Se non riesce, sono in «Senza nome» e la ricerca non li trova.</p>
+    <p><b>Bennet non ha il prezzo in numero.</b> Il numero che danno i siti a volte è sbagliato: il Findus in copertina costa 6,99 €, loro scrivono 15,99 €. Quindi lo mostro solo in foto, e con «Prima il meno caro» Bennet viene dopo gli altri. Di molti prodotti Bennet i siti non danno nemmeno il nome: lo leggo dalla foto con un programma, quindi può essere impreciso, e sopra c'è scritto. Se non riesce, sono in «Senza nome» e la ricerca non li trova.</p>
     <p><b>Carrefour</b> viene dall'elenco ufficiale del sito: la foto è quella del prodotto, il prezzo è quello del volantino. Per pochi prodotti non so dove stanno sulla pagina.</p>
+    <p><b>Lo sconto</b> è quello scritto sul volantino. Carrefour lo dà nel sito; per Conad e Coop lo leggo nel PDF e lo tengo solo se torna col prezzo barrato; per Bennet lo leggo dal bollino rosso della foto, e circa uno su dieci non riesco a leggerlo. Un «3x2» conta come −33%, un «1+1 gratis» come −50%. Chi non scrive la percentuale, come i «Sottocosto» di Bennet e i «Conviene» della Coop, viene dopo. Alcuni sconti valgono solo con la carta del negozio o per i soci: lo dice la foto.</p>
     <p><b>Le categorie</b> le deduco dal nome, tranne per Carrefour, che ha le sue: circa un prodotto su dieci può stare nel posto sbagliato. La ricerca lo trova lo stesso.</p>
     <p><b>Cosa non c'è in tabella:</b> le offerte senza un prezzo, come «sconto del 30% su tutta la linea» (per esempio le pagine Scegli tu della Coop), e i cataloghi come vini e premi. Questi stanno nei volantini.</p>
     <p><b>«Atteso»</b> è una stima: il giorno dopo la fine del volantino in corso. Di cosa ci sarà dentro non si sa niente. Conad pubblica il volantino una settimana prima; Carrefour qualche giorno prima; Bennet e Coop, sui siti che riesco a leggere, solo il giorno che parte.</p>
@@ -387,13 +391,14 @@ for (const n of DATI.negozi) {
         negozio: n.nome, idNegozio: n.id, volantino: v.titolo, dal, al, categoria: x.cat,
         riquadro: x.riquadro, pagina: pagine[x.pag], proporzione: v.proporzione, urlVolantino: v.url,
         cerca: normale((x.nome || "") + " " + n.nome),
-        valore: prezzi.length ? Math.min(...prezzi.map(numero)) : Infinity,
+        valore: prezzi.map(numero).filter(v => v > 0).reduce((a, b) => Math.min(a, b), Infinity),
+        sconto: x.sconto || 0,
       });
     }
   }
 }
 
-const parametriIniziali = { negozio: parametri.get("negozio") || "tutti", categoria: parametri.get("categoria") || "tutte", quando: parametri.get("quando") || "tutti", testo: parametri.get("cerca") || "" };
+const parametriIniziali = { negozio: parametri.get("negozio") || "tutti", categoria: parametri.get("categoria") || "tutte", quando: parametri.get("quando") || "tutti", testo: parametri.get("cerca") || "", ordine: parametri.get("ordine") || "sconto" };
 const stato = { ...parametriIniziali, mostrati: 0 };
 const PASSO = 40;
 let trovati = [];
@@ -415,15 +420,19 @@ function filtra() {
     b.hidden = n === 0 && v !== "tutte" && v !== stato.categoria;
   });
   trovati = stato.categoria === "tutte" ? base : base.filter(p => p.categoria === stato.categoria);
-  /* Se cerchi qualcosa, prima il meno caro. Altrimenti negozio per negozio, come nei volantini. */
-  if (parole.length) trovati.sort((a, b) => a.valore - b.valore);
+  /* L'ordinamento tiene l'ordine dei volantini fra i pari: chi non ha lo sconto scritto resta in fondo, come nei volantini. */
+  if (stato.ordine === "sconto") trovati.sort((a, b) => b.sconto - a.sconto);
+  else if (stato.ordine === "prezzo") trovati.sort((a, b) => a.valore === b.valore ? 0 : a.valore < b.valore ? -1 : 1);
   stato.mostrati = 0;
   document.getElementById("righe").innerHTML = "";
   const totale = trovati.length.toLocaleString("it-IT");
+  const quanti = parole.length ? totale + " per «" + stato.testo + "»" : totale + " prodotti";
+  const conSconto = trovati.filter(p => p.sconto).length;
   let scritta2;
   if (!trovati.length) scritta2 = parole.length ? "Nessun prodotto per «" + stato.testo + "»." : "Nessun prodotto con questi filtri.";
-  else if (parole.length) scritta2 = totale + " per «" + stato.testo + "», dal meno caro. Il prezzo giusto è quello nella foto.";
-  else scritta2 = totale + " prodotti. Il prezzo giusto è quello nella foto: toccala per vederla sul volantino.";
+  else if (stato.ordine === "sconto") scritta2 = quanti + (conSconto ? ": prima i " + conSconto.toLocaleString("it-IT") + " con lo sconto scritto, dal più alto. " : ": nessuno ha lo sconto scritto. ") + "Il prezzo giusto è quello nella foto.";
+  else if (stato.ordine === "prezzo") scritta2 = quanti + ", dal meno caro" + (trovati.some(p => p.idNegozio === "bennet") ? "; Bennet in fondo, il suo prezzo è solo nella foto. " : ". ") + "Il prezzo giusto è quello nella foto.";
+  else scritta2 = quanti + ", come nei volantini. Il prezzo giusto è quello nella foto: toccala per vederla sul volantino.";
   document.getElementById("conteggio").textContent = scritta2;
   altre();
 }
@@ -441,9 +450,10 @@ function rigaProdotto(p, indice) {
   const giorni = giorniTra(OGGI, al);
   const classe = !partito ? "parte" : giorni <= 1 ? "urgente" : giorni <= 4 ? "presto" : "normale";
   const quando = !partito ? "dal " + scritta(dal) + " al " + breve(al) : giorni === 0 ? "ultimo giorno oggi" : "fino a " + scritta(al);
+  const sconto = p.sconto ? '<span class="sconto">−' + p.sconto + "%</span>" : "";
   const prezzo = p.prezzi.length
-    ? '<div class="prezzo">' + p.prezzi.map(v => esc(v).replace(/^([\d.,]+)\s*(.*)$/, "$1 € $2").trim()).join(" · ") + (p.unita ? "<small>" + esc(p.unita) + "</small>" : "") + "</div>"
-    : '<div class="prezzo-foto">Prezzo nella foto' + (p.nomeLetto ? ", nome letto dalla foto" : "") + "</div>";
+    ? '<div class="prezzo">' + p.prezzi.map(v => esc(v).replace(/^([\d.,]+)\s*(.*)$/, "$1 € $2").trim()).join(" · ") + (sconto ? " " + sconto : "") + (p.unita ? "<small>" + esc(p.unita) + "</small>" : "") + "</div>"
+    : '<div class="prezzo-foto">' + sconto + (p.idNegozio === "bennet" ? "Prezzo nella foto" + (p.nomeLetto ? ", nome letto dalla foto" : "") : "") + "</div>";
   return '<tr><td><button type="button" class="foto" data-indice="' + indice + '" aria-label="Ingrandisci ' + esc(p.nome) + '">' + fotoRiga(p) + '</button></td>'
     + '<td><div class="nome-prodotto">' + esc(p.nome) + "</div>" + prezzo
     + '<div class="dove-prodotto">' + esc(p.negozio) + " · " + esc(p.volantino) + (p.pag ? " · pag. " + p.pag : "") + "</div>"
@@ -481,6 +491,7 @@ function preparaTabella() {
   bottoni("filtro-negozi", [["tutti", "Tutti"]].concat(DATI.negozi.map(n => [n.id, n.nome])), "negozio");
   bottoni("filtro-categorie", [["tutte", "Tutte"]].concat((DATI.categorie || []).map(c => [c, c])), "categoria");
   bottoni("filtro-quando", [["tutti", "Da oggi in poi"], ["corso", "Valide oggi"], ["arrivo", "In arrivo (" + inArrivo + ")"]], "quando");
+  bottoni("filtro-ordine", [["sconto", "Prima lo sconto più alto"], ["prezzo", "Prima il meno caro"], ["volantino", "Come nel volantino"]], "ordine");
   const campo = document.getElementById("cerca");
   campo.value = stato.testo;
   let attesa;

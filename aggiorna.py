@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Volantini di Ivrea: legge i siti dei negozi e scrive docs/index.html e docs/dati.json.
 
-Usa solo la libreria standard, più poppler (pdftotext, pdftohtml, pdftoppm).
+Usa la libreria standard, più poppler (pdftotext, pdftohtml, pdftoppm), tesseract e Pillow.
+Senza tesseract i prodotti Bennet senza nome restano senza nome; senza Pillow restano senza sconto.
 I prodotti con foto e prezzo vengono da tre strade diverse, spiegate in CONTEXT.md:
 il sito Carrefour, i ritagli di DoveConviene per Bennet, i PDF per Conad e Coop (ritagli.py).
+Lo sconto: Carrefour lo scrive nella scheda, Conad e Coop nel PDF, Bennet solo nel bollino rosso della pagina.
 
 Se un negozio non si legge, tiene i dati dell'ultima volta e lo segnala sulla pagina;
 in quel caso esce con codice 3, così GitHub Actions lo segnala per mail.
@@ -22,8 +24,14 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+try:
+    from PIL import Image, ImageChops
+except ImportError:  # senza Pillow i prodotti Bennet restano senza sconto
+    Image = ImageChops = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import categorie  # noqa: E402
@@ -82,8 +90,9 @@ NOTE_A_MANO = {
 }
 
 # Volantini che non sono "il" volantino del negozio: stanno sotto, in grigio.
+# «Scegli tu» della Coop: solo percentuali su intere marche, nessun prezzo da mettere in tabella.
 PAROLE_CATALOGO = ("premio", "perché conviene", "catalogo", "ceste", "speciale", "punti",
-                   "addobb", "giocattol", "vini", "payback")
+                   "addobb", "giocattol", "vini", "payback", "scegli tu")
 
 
 class NonLetto(Exception):
@@ -351,6 +360,7 @@ def prodotti_bennet(volantino, oggi):
                     elenco.append(elemento)
     volantino["pagine"] = pagine
     nomi_da_ocr(volantino, elenco)
+    sconti_bennet(volantino, elenco)
     for elemento in elenco:
         elemento.pop("id", None)
         elemento["cat"] = categorie.categoria(elemento["nome"]) if elemento["nome"] else categorie.SENZA_NOME
@@ -413,6 +423,121 @@ def nomi_da_ocr(volantino, elenco):
             elemento["letto"] = True
 
 
+def leggi_bollino(tela, volte):
+    """Il numero scritto in un bollino, o None. Fra il 10 e l'80%: sotto il 10 è quasi sempre una cifra persa."""
+    with io.BytesIO() as file:
+        (tela.resize((tela.width * volte, tela.height * volte), Image.LANCZOS) if volte > 1 else tela).save(file, "PNG")
+        letto = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "7", "-l", "eng", "-c", "tessedit_char_whitelist=-0123456789%"],
+                               input=file.getvalue(), capture_output=True, timeout=60, check=True).stdout.decode("utf-8", "replace").strip()
+    numero = re.fullmatch(r"-\s*(\d{2})\s*%?-?|(\d{2})\s*%", letto)
+    valore = int(numero.group(1) or numero.group(2)) if numero else None
+    return valore if valore is not None and 10 <= valore <= 80 else None
+
+
+def bollini_rossi(dati_immagine):
+    """Gli sconti nei rettangoli rossi di una pagina Bennet («-22%»): [(percento, x, y)], x e y in frazioni di pagina.
+
+    I rettangoli si cercano sulla maschera dei pixel rossi; dentro, il rosso diventa bianco e la scritta nera.
+    Ogni bollino si legge due volte a grandezze diverse: se i numeri non coincidono, niente sconto.
+    Provato il 7/11/2026 su 86 bollini guardati a occhio: 77 letti giusti, 9 persi, nessuno sbagliato.
+    Non si leggono i bollini bianchi su fondo rosso e quelli piccoli; i «Sottocosto» Bennet non scrivono la percentuale.
+    """
+    pagina = Image.open(io.BytesIO(dati_immagine)).convert("RGB")
+    rosso, verde, blu = pagina.split()
+    maschera = ImageChops.multiply(
+        ImageChops.multiply(rosso.point(lambda v: 255 if v > 150 else 0),
+                            ImageChops.subtract(rosso, verde).point(lambda v: 255 if v > 90 else 0)),
+        ImageChops.subtract(rosso, blu).point(lambda v: 255 if v > 70 else 0))
+    largo, alto = maschera.size
+    passo = max(2, round(largo / 300))
+    griglia = maschera.resize((largo // passo, alto // passo), Image.BOX)
+    gl, ga = griglia.size
+    valori = griglia.load()
+    pieno = [[valori[x, y] > 110 for x in range(gl)] for y in range(ga)]
+    trovati = []
+    for y in range(ga):
+        for x in range(gl):
+            if not pieno[y][x]:
+                continue
+            coda, celle = deque([(x, y)]), 0
+            pieno[y][x] = False
+            x0 = x1 = x
+            y0 = y1 = y
+            while coda:
+                cx, cy = coda.popleft()
+                celle += 1
+                x0, x1, y0, y1 = min(x0, cx), max(x1, cx), min(y0, cy), max(y1, cy)
+                for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                    if 0 <= nx < gl and 0 <= ny < ga and pieno[ny][nx]:
+                        pieno[ny][nx] = False
+                        coda.append((nx, ny))
+            l, a = (x1 - x0 + 1) * passo, (y1 - y0 + 1) * passo
+            if not (l >= 0.06 * largo and 0.015 * alto <= a <= 0.08 * alto and celle / ((x1 - x0 + 1) * (y1 - y0 + 1)) > 0.6):
+                continue  # non è un bollino: troppo piccolo, troppo alto o non pieno
+            # Col logo Bennet Club attaccato a destra il rettangolo è lungo: si legge solo la parte sinistra
+            margine = max(3, round(a * 0.1))
+            fine = x0 * passo + (round(a * 2.0) if l > a * 2.8 else l)
+            pezzo = maschera.crop((x0 * passo + margine, y0 * passo + margine, fine - margine, y0 * passo + a - margine))
+            tela = Image.new("L", (pezzo.width + 40, pezzo.height + 40), 255)
+            tela.paste(pezzo, (20, 20))
+            grande, piccola = leggi_bollino(tela, 2), leggi_bollino(tela, 1)
+            if grande is not None and piccola is not None and grande != piccola:
+                continue
+            if grande or piccola:
+                trovati.append((grande or piccola, (x0 * passo + l / 2) / largo, (y0 * passo + a / 2) / alto))
+    return trovati
+
+
+def sconti_bennet(volantino, elenco):
+    """Lo sconto dei prodotti Bennet: il bollino rosso dentro il riquadro. Si legge una volta sola per volantino."""
+    if Image is None or not shutil.which("tesseract"):
+        print("Pillow o tesseract mancano: i prodotti Bennet restano senza sconto", file=sys.stderr)
+        return
+    memoria = USCITA / "img" / volantino["chiave"] / "sconti.json"
+    letti = json.loads(memoria.read_text("utf-8")) if memoria.exists() else {}
+    da_leggere = sorted({e["pag"] for e in elenco if e["id"] not in letti})
+    for numero in da_leggere:
+        try:
+            bollini = bollini_rossi(scarica(volantino["pagine"][str(numero)]))
+        except Exception as errore:  # lo sconto è un di più: la pagina si riprova al giro dopo, i prodotti restano
+            print(f"Bennet, sconti di pag. {numero} non letti: {errore}", file=sys.stderr)
+            continue
+        prodotti = [e for e in elenco if e["pag"] == numero]
+        for elemento in prodotti:
+            letti.setdefault(elemento["id"], None)
+        for percento, x, y in bollini:
+            dentro = [e for e in prodotti if e["riquadro"][0] <= x <= e["riquadro"][2] and e["riquadro"][1] <= y <= e["riquadro"][3]]
+            if dentro:  # due riquadri che si sovrappongono: il bollino va al più piccolo
+                scelto = min(dentro, key=lambda e: (e["riquadro"][2] - e["riquadro"][0]) * (e["riquadro"][3] - e["riquadro"][1]))
+                letti[scelto["id"]] = max(letti.get(scelto["id"]) or 0, percento)
+    if da_leggere:
+        memoria.parent.mkdir(parents=True, exist_ok=True)
+        memoria.write_text(json.dumps(letti, ensure_ascii=False), "utf-8")
+    for elemento in elenco:
+        if letti.get(elemento["id"]):
+            elemento["sconto"] = letti[elemento["id"]]
+
+
+def sconto_carrefour(meccanica, barrato, prezzo):
+    """Lo sconto della scheda Carrefour: «-20%», «SOTTOCOSTO -55% …», «3 X 2», «1+1 GRATIS», o dal prezzo barrato."""
+    trovato = re.search(r"-\s*(\d{1,2})\s*%", meccanica)
+    if trovato:
+        return int(trovato.group(1))
+    trovato = re.search(r"\b(\d)\s*[xX]\s*(\d)\b", meccanica)
+    if trovato and int(trovato.group(1)) > int(trovato.group(2)) > 0:
+        prendi, paghi = int(trovato.group(1)), int(trovato.group(2))
+        return round((prendi - paghi) / prendi * 100)
+    trovato = re.search(r"\b(\d)\s*\+\s*(\d)\s*gratis", meccanica, re.I)
+    if trovato and int(trovato.group(1)) > 0:
+        paghi, gratis = int(trovato.group(1)), int(trovato.group(2))
+        return round(gratis / (paghi + gratis) * 100)
+    try:
+        prima, dopo = ritagli.euro(re.sub(r"[^\d,]", "", barrato)), ritagli.euro(re.sub(r"[^\d,]", "", prezzo))
+    except ValueError:
+        return None
+    return round((prima - dopo) / prima * 100) if prima > dopo > 0 else None
+
+
 def posizioni_carrefour(volantino):
     """Le pagine del volantino e i riquadri dei prodotti: il codice del riquadro è nel nome del file della foto."""
     pagina = html.unescape(testo(volantino["url"]))
@@ -460,8 +585,8 @@ def prodotti_carrefour(volantino, oggi):
     """L'elenco ufficiale, con foto, prezzo, categoria e posto sulla pagina. Si legge una volta sola per volantino."""
     cartella = USCITA / "img" / volantino["chiave"]
     salvati = cartella / "prodotti.json"
-    if salvati.exists():
-        memoria = json.loads(salvati.read_text("utf-8"))
+    memoria = json.loads(salvati.read_text("utf-8")) if salvati.exists() else {}
+    if memoria.get("versione") == ritagli.VERSIONE:  # una versione vecchia (senza sconto) si rilegge
         volantino["pagine"] = memoria["pagine"]
         for elemento in memoria["prodotti"]:
             elemento["cat"] = categorie.categoria_carrefour(elemento["nome"], elemento.get("etichetta"))
@@ -483,15 +608,25 @@ def prodotti_carrefour(volantino, oggi):
             prezzo = re.search(r'd-prices__final[^>]*>\s*<strong>([^<]+)', scheda)
             foto = re.search(r'data-src="([^"]+)"', scheda)
             unita = re.search(r'd-prices__partial[^>]*>([^<]+)', scheda)
+            meccanica = re.search(r'class="item-two[^"]*item-mec[^"]*"[^>]*>(.*?)</div>', scheda, re.S)
+            barrato = re.search(r'd-prices__original[^>]*>\s*<span[^>]*>([^<]+)', scheda)
             if not codice or codice.group(1) in visti or not nome:
                 continue
             visti.add(codice.group(1))
             nuovi += 1
             indirizzo_foto = foto.group(1) if foto else ""
             nome_pulito = html.unescape(nome.group(1)).strip()
+            prezzo_scritto = html.unescape(prezzo.group(1)).replace("€", "").strip() if prezzo else ""
+            # «-50% su tutta la linea»: al posto del prezzo c'è lo sconto, e la marca sta a parte
+            sconto_linea = re.fullmatch(r"-\s*(\d{1,2})\s*%", prezzo_scritto)
+            if sconto_linea:
+                prezzo_scritto = ""
+                marca = re.search(r'<h2 class="brand">\s*([^<]*?)\s*</h2>', scheda)
+                if marca and marca.group(1).strip():
+                    nome_pulito = html.unescape(marca.group(1)).strip() + " " + nome_pulito
             elemento = {
                 "nome": nome_pulito,
-                "prezzi": [html.unescape(prezzo.group(1)).replace("€", "").strip()] if prezzo else [],
+                "prezzi": [prezzo_scritto] if prezzo_scritto else [],
                 "unita": re.sub(r"\s+", " ", html.unescape(unita.group(1))).strip() if unita else "",
                 "foto": ("https://www.carrefour.it" if indirizzo_foto.startswith("/") else "") + indirizzo_foto,
                 "etichetta": etichette.get(codice.group(1)),
@@ -501,13 +636,20 @@ def prodotti_carrefour(volantino, oggi):
             posto = riquadri.get(str(int(numero_foto.group(1)))) if numero_foto else None
             if posto:
                 elemento["pag"], elemento["riquadro"] = posto
+            sconto = sconto_carrefour(
+                re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", meccanica.group(1)))) if meccanica else "",
+                html.unescape(barrato.group(1)) if barrato else "", elemento["prezzi"][0] if elemento["prezzi"] else "")
+            if sconto_linea:
+                sconto = int(sconto_linea.group(1))
+            if sconto:
+                elemento["sconto"] = sconto
             elenco.append(elemento)
         if not nuovi:
             break
         time.sleep(0.15)
     if elenco:
         cartella.mkdir(parents=True, exist_ok=True)
-        salvati.write_text(json.dumps({"prodotti": elenco, "pagine": pagine}, ensure_ascii=False), "utf-8")
+        salvati.write_text(json.dumps({"versione": ritagli.VERSIONE, "prodotti": elenco, "pagine": pagine}, ensure_ascii=False), "utf-8")
     volantino["pagine"] = pagine
     return elenco
 
@@ -516,19 +658,21 @@ def prodotti_pdf(volantino, oggi, usa_date_di_pagina):
     """I ritagli dal PDF. Si fanno una volta sola per volantino: restano in docs/img/<chiave>."""
     cartella = USCITA / "img" / volantino["chiave"]
     salvati = cartella / "prodotti.json"
-    if salvati.exists():
-        memoria = json.loads(salvati.read_text("utf-8"))
+    memoria = json.loads(salvati.read_text("utf-8")) if salvati.exists() else {}
+    if memoria.get("versione") == ritagli.VERSIONE:  # una versione vecchia (senza sconto) si rifà
         elenco, pagine = memoria["prodotti"], memoria["pagine"]
     else:
         with tempfile.NamedTemporaryFile(suffix=".pdf") as file_pdf:
             file_pdf.write(scarica(volantino["pdf"], timeout=180))
             file_pdf.flush()
             elenco, pagine = ritagli.ritaglia_volantino(file_pdf.name, cartella, f"img/{volantino['chiave']}")
-        salvati.write_text(json.dumps({"prodotti": elenco, "pagine": pagine}, ensure_ascii=False), "utf-8")
+        salvati.write_text(json.dumps({"versione": ritagli.VERSIONE, "prodotti": elenco, "pagine": pagine}, ensure_ascii=False), "utf-8")
     volantino["pagine"] = pagine
     uscita = []
     for voce in elenco:
         nuova = {k: voce[k] for k in ("nome", "prezzi", "pag", "foto", "riquadro")}
+        if voce.get("sconto"):
+            nuova["sconto"] = voce["sconto"]
         nuova["cat"] = categorie.SENZA_NOME if voce["nome"].startswith("Offerta a pag") else categorie.categoria(voce["nome"])
         # Coop scrive su ogni pagina da quando a quando vale. Su Conad le stesse parole sono banner di una sola offerta.
         if voce.get("finestra") and usa_date_di_pagina:

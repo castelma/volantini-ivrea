@@ -17,9 +17,12 @@ from pathlib import Path
 
 DPI = 130
 LARGHEZZA_PAGINA = 1240  # pixel delle immagini di pagina: bastano per leggere ingrandendo
+VERSIONE = 2  # 2: con lo sconto. I ritagli salvati con una versione diversa si rifanno
 PREZZO_SOLO = re.compile(r"^\s*€?\s*(\d{1,3}),(\d{2})\s*€?\s*$")
 INTERO = re.compile(r"^\s*€?\s*(\d{1,3})\s*$")
 DECIMALI = re.compile(r"^\s*,\s*(\d{2})\s*€?\s*$")
+PERCENTO = re.compile(r"^\s*-?\s*(\d{1,2})(?:,(\d{1,2}))?\s*%\s*$")
+NUMERO_SCONTO = re.compile(r"^\s*-?\s*(\d{1,2})(?:,(\d{1,2}))?\s*$")
 # Quello che in un riquadro non è il nome del prodotto
 NON_NOME = re.compile(
     r"€|%|\bal (kg|l|lt|pz)\b|^\s*(sotto|costo|sotto ?costo|conviene|sconto|sconto (soci|clienti)|soci|clienti|"
@@ -279,6 +282,41 @@ def nome_da(ancora, testi):
     return re.sub(r"(ff)\s(?=[a-zà-ù])", r"\1", nome)[:110]
 
 
+def euro(scritto):
+    return float(scritto.replace(".", "").replace(",", "."))
+
+
+def sconto_scritto(testi, prezzi):
+    """Lo sconto scritto vicino al prezzo («-51,96%», oppure «30» e «%» separati), in percento intero.
+
+    Vale solo se torna col prezzo barrato dello stesso pezzo: (barrato - prezzo) / barrato, con 1,5 punti di tolleranza.
+    Così uno sconto del prodotto accanto, finito nello stesso pezzo, non si attacca al prezzo sbagliato.
+    """
+    scritti = []
+    for t in testi:
+        trovato = PERCENTO.match(t["t"])
+        if not trovato:
+            trovato = NUMERO_SCONTO.match(t["t"])
+            alto = t["y1"] - t["y0"]
+            if not trovato or not any(p["t"].strip() == "%" and -3 <= p["x0"] - t["x1"] <= alto * 1.5
+                                      and p["y0"] < t["y1"] and p["y1"] > t["y0"] for p in testi):
+                continue
+        scritti.append(float(trovato.group(1) + "." + (trovato.group(2) or "0")))
+    if not scritti:
+        return None
+    barrati = [euro(f"{m.group(1)},{m.group(2)}") for t in testi if (m := PREZZO_SOLO.match(t["t"]))]
+    migliore = None
+    for prezzo in (euro(p) for p in prezzi):
+        for barrato in barrati:
+            if barrato <= prezzo:
+                continue
+            calcolato = (barrato - prezzo) / barrato * 100
+            for scritto in scritti:
+                if abs(calcolato - scritto) <= 1.5 and 5 <= scritto <= 90:
+                    migliore = max(migliore or 0, round(scritto))
+    return migliore
+
+
 def bella_scrittura(nome):
     """DA TUTTO MAIUSCOLO a una forma leggibile, lasciando stare il resto."""
     piccole = {"DI", "DE", "DEL", "DA", "IN", "CON", "AL", "ALLA", "E", "O", "LA", "LE", "IL", "PER", "SU", "A"}
@@ -368,6 +406,13 @@ def ritaglia_volantino(percorso_pdf, cartella_uscita, prefisso_url):
                 "riquadro": [round(x0 / pagina["w"], 4), round(y0 / pagina["h"], 4),
                              round(x1 / pagina["w"], 4), round(y1 / pagina["h"], 4)],
             }
+            # Lo sconto: si cerca nel pezzo tagliato e nel riquadro, ma deve tornare col prezzo barrato
+            vicini = [t for t in pagina["testi"]
+                      if (regione[0] <= centro(t, "x") <= regione[2] and regione[1] <= centro(t, "y") <= regione[3])
+                      or (x0 <= centro(t, "x") <= x1 and y0 <= centro(t, "y") <= y1)]
+            sconto = sconto_scritto(vicini, ancora["prezzi"])
+            if sconto:
+                voce["sconto"] = sconto
             if finestre:  # più date sulla stessa pagina: vale quella alla stessa altezza
                 voce["finestra"] = min(finestre, key=lambda f: abs(f[1] - centro(ancora, "y")))[0]
             if fino_a:
