@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Volantini di Ivrea: legge i siti dei negozi e scrive docs/index.html e docs/dati.json.
+Scrive anche docs/testi.json, il testo di ogni pagina dei volantini in PDF (Conad e Coop), che la pagina non usa:
+serve alle «Offerte da seguire» di Home Assistant per trovare una parola anche quando il nome del prodotto non si legge.
 
 Usa la libreria standard, più poppler (pdftotext, pdftohtml, pdftoppm), tesseract e Pillow.
 Senza tesseract i prodotti Bennet senza nome restano senza nome; senza Pillow restano senza sconto.
@@ -688,6 +690,26 @@ def prodotti_pdf(volantino, oggi, usa_date_di_pagina):
     return uscita
 
 
+def testi_pdf(volantino):
+    """Il testo di ogni pagina del PDF, per le «Offerte da seguire» di Home Assistant (13/11/2026). Lì una riga si cerca
+    anche fuori dai nomi, che a volte non si leggono: nel volantino Coop del 12/11 37 prodotti su 233 si chiamano
+    «Offerta a pag. 7», «con», «OCI», ma il loro nome è scritto nella pagina. Una volta sola per volantino."""
+    memoria = USCITA / "img" / volantino["chiave"] / "testi.json"
+    if memoria.exists():
+        return json.loads(memoria.read_text("utf-8"))
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as file_pdf:
+        file_pdf.write(scarica(volantino["pdf"], timeout=180))
+        file_pdf.flush()
+        uscita = subprocess.run(["pdftotext", "-raw", file_pdf.name, "-"], capture_output=True, timeout=180, check=True)
+    pagine = {}
+    for numero, pagina in enumerate(uscita.stdout.decode("utf-8", "replace").split("\f"), start=1):
+        if pagina.split():
+            pagine[str(numero)] = " ".join(pagina.split())
+    memoria.parent.mkdir(parents=True, exist_ok=True)
+    memoria.write_text(json.dumps(pagine, ensure_ascii=False), "utf-8")
+    return pagine
+
+
 def aggiungi_prodotti(negozio, volantini, precedenti, oggi):
     """Solo i volantini principali. Se uno non si legge, tiene l'elenco dell'ultima volta e lo segnala."""
     vecchi = {v["chiave"]: v for v in precedenti.get("volantini", [])}
@@ -767,6 +789,19 @@ def main():
     dati = {"aggiornato": adesso.isoformat(timespec="minutes"), "negozi": negozi,
             "categorie": categorie.ORDINE + [categorie.SENZA_NOME]}
     percorso_dati.write_text(json.dumps(dati, ensure_ascii=False, indent=1) + "\n", "utf-8")
+
+    # Il testo delle pagine dei volantini in PDF, per Home Assistant. Se non si legge, la notifica cerca solo nei nomi:
+    # non è un errore del giro (niente mail di GitHub), solo un avviso nel registro.
+    testi = {}
+    for negozio in negozi:
+        for volantino in negozio["volantini"]:
+            if volantino.get("pdf") and volantino.get("tipo") == "principale":
+                try:
+                    testi[f"{negozio['id']}|{volantino['chiave']}"] = testi_pdf(volantino)
+                except Exception as errore:
+                    print("AVVISO testo non letto:", negozio["nome"], volantino["titolo"], errore, file=sys.stderr)
+    (USCITA / "testi.json").write_text(json.dumps({"aggiornato": dati["aggiornato"], "volantini": testi},
+                                                  ensure_ascii=False) + "\n", "utf-8")
     incorporati = json.dumps(dati, ensure_ascii=False).replace("<", "\\u003c")
     pagina = MODELLO.read_text("utf-8").replace("/*DATI*/null", incorporati)
     (USCITA / "index.html").write_text(pagina, "utf-8")
